@@ -1,0 +1,59 @@
+services:
+  backend:
+    build: ./backend
+    container_name: taller_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://admin:admin@taller_db/taller_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      taller_db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # NUEVO SERVICIO: El worker que ejecutará las tareas
+  celery_worker:
+    build: ./backend
+    container_name: taller_celery_worker
+    command: celery -A celery_worker.celery_app beat -l info # Comando para iniciar el planificador
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://admin:admin@taller_db/taller_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - backend
+
+  taller_db:
+    image: postgres:13
+    container_name: taller_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_DB=taller_db
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d taller_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # NUEVO SERVICIO: La base de datos en memoria para Celery
+  redis:
+    image: redis:7-alpine
+    container_name: taller_redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

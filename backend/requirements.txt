@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+SQLAlchemy
+python-dotenv
+pandas
+openpyxl
+python-multipart
+celery
+redis
+passlib==1.7.4
+bcrypt==3.2.0
+python-jose[cryptography]
