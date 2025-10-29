@@ -10,8 +10,6 @@ import prettierSkipFormatting from '@vue/eslint-config-prettier/skip-formatting'
 export default [
   // 1. Objeto de Ignorados Globales
   {
-    // ESLint requiere que "ignores" sea la única clave en este objeto.
-    // Quasar ya ignora node_modules y otras carpetas relevantes.
     ignores: [
       'dist',
       '.quasar',
@@ -23,20 +21,20 @@ export default [
   },
 
   // 2. Recomendaciones Base de Quasar
-  // Contiene reglas y configuraciones específicas para proyectos Quasar.
   ...pluginQuasar.configs.recommended(),
 
-  // 3. Configuración para TypeScript (LA CLAVE DEL PROBLEMA)
-  // Este bloque aplica reglas de TypeScript a todos los archivos relevantes.
+  // 3. Configuración para TypeScript (Archivos .ts, .js)
   {
-    files: ['**/*.{ts,tsx,vue,js,jsx}'], // Aplica a todos los archivos de script
+    // --- 👇 CAMBIO 1: Quitamos '.vue' de esta lista ---
+    files: ['**/*.{ts,tsx,js,jsx}'], 
     plugins: {
       '@typescript-eslint': typescriptEslint,
     },
     languageOptions: {
-      parser: typescriptParser, // Usa el parser de TypeScript
+      parser: typescriptParser, 
       parserOptions: {
-        project: true, // Habilita reglas que requieren información de tipos
+        // --- 👇 CAMBIO 2: Somos explícitos con la ruta del proyecto ---
+        project: './tsconfig.json', 
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -46,22 +44,22 @@ export default [
     },
   },
 
-  // 4. Configuración Específica para Vue
-  // Este bloque se enfoca solo en los archivos .vue.
+  // 4. Configuración Específica para Vue (Archivos .vue)
   {
     files: ['**/*.vue'],
     plugins: {
       vue: pluginVue,
     },
-    // Usa vue-eslint-parser para el template, y le indica que use el parser de TS para el <script>
     languageOptions: {
       parser: vueParser,
       parserOptions: {
         parser: typescriptParser,
         extraFileExtensions: ['.vue'],
+        // --- 👇 CAMBIO 3: Añadimos la configuración explícita del proyecto AQUÍ TAMBIÉN ---
+        project: './tsconfig.json',
+        tsconfigRootDir: import.meta.dirname,
       },
     },
-    // Usa un conjunto de reglas más robusto para Vue 3.
     rules: {
       ...pluginVue.configs['flat/recommended'].rules,
     },
@@ -85,10 +83,8 @@ export default [
     },
     rules: {
       'prefer-promise-reject-errors': 'off',
-      // Permite el debugger solo en desarrollo
       'no-debugger': process.env.NODE_ENV === 'production' ? 'error' : 'off',
-      // Reglas adicionales recomendadas:
-      'vue/multi-word-component-names': 'off', // Muy común desactivarla en proyectos Quasar
+      'vue/multi-word-component-names': 'off', 
       'vue/no-reserved-component-names': 'off',
     },
   },
@@ -104,6 +100,5 @@ export default [
   },
   
   // 7. Integración con Prettier (SIEMPRE AL FINAL)
-  // Desactiva cualquier regla de formato de ESLint para que Prettier tenga el control.
   prettierSkipFormatting,
 ];

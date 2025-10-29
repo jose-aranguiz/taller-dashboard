@@ -2,6 +2,7 @@
 from sqlalchemy.orm import Session
 import crud, schemas
 from database import SessionLocal
+import getpass  # <--- IMPORTANTE: Importamos getpass
 
 def create_super_user():
     db: Session = SessionLocal()
@@ -11,7 +12,9 @@ def create_super_user():
     # Pide los datos por terminal
     username = input("Ingresa el nombre de usuario del admin: ")
     email = input("Ingresa el email del admin: ")
-    password = input("Ingresa la contraseña del admin: ")
+    
+    # Usamos getpass para que la contraseña no se vea al escribirla
+    password = getpass.getpass("Ingresa la contraseña del admin: ")
 
     user_in = schemas.UserCreate(username=username, email=email, password=password)
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Body, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func, inspect
+from sqlalchemy.exc import SQLAlchemyError  # <--- IMPORTANTE: Importamos el error específico
 from typing import List, Optional
 import models, schemas, auth
 from database import SessionLocal
@@ -111,13 +112,19 @@ def leer_trabajos_paginados(
                 tiempo_activo_segundos = tiempo_total_segundos - tiempo_detenido_segundos
                 trabajo.dias_de_estadia_activa = int(tiempo_activo_segundos / (24 * 3600)) if tiempo_activo_segundos > 0 else 0
             except Exception as e:
+                # Este 'except Exception' es aceptable aquí, porque no queremos
+                # que un error de cálculo en un solo trabajo detenga toda la lista.
                 logger.error(f"Error calculando días de estadía para trabajo ID {trabajo.id}: {e}")
                 trabajo.dias_de_estadia_activa = -1
 
         return {"items": items, "total": total_records}
 
+    # --- 👇 MEJORA DE MANEJO DE ERRORES AQUÍ 👇 ---
+    except SQLAlchemyError as e:
+        logger.error(f"Error de base de datos en leer_trabajos_paginados: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error de base de datos al consultar trabajos.")
     except Exception as e:
-        logger.error(f"Error fatal en leer_trabajos_paginados: {e}", exc_info=True)
+        logger.error(f"Error inesperado en leer_trabajos_paginados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Ocurrió un error inesperado en el servidor al listar los trabajos.")
 
 # --- EL RESTO DE LAS RUTAS SE MANTIENEN IGUAL ---
@@ -222,6 +229,9 @@ async def cargar_trabajos_desde_excel(
         df = pd.read_excel(io.BytesIO(contenido_bytes), header=header_row_index, engine=None)
 
     except Exception as e:
+        # Este 'except Exception' está bien aquí, ya que leer un archivo puede fallar
+        # por muchas razones (archivo corrupto, mal formato, etc.) y queremos 
+        # reportarlo como un error de "mala solicitud" (400).
         logger.error(f"Error al leer o procesar el Excel: {e}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
@@ -279,9 +289,24 @@ async def cargar_trabajos_desde_excel(
                 historial_inicial = models.HistorialDeEstado(trabajo_id=nuevo_trabajo.id, estado="agendado")
                 db.add(historial_inicial)
                 trabajos_creados += 1
+        
+        # --- 👇 MEJORA DE MANEJO DE ERRORES AQUÍ 👇 ---
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Error de Base de Datos procesando fila {index + 2}: {e}", exc_info=True)
+            # Damos un error un poco más detallado al cliente
+            error_detail = str(e.__cause__ or e).split('\n')[0] # Tomamos la primera línea del error de DB
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Error de BD en la fila {index + 2}. Detalle: {error_detail}")
         except Exception as e:
             db.rollback()
-            logger.error(f"Error procesando fila {index + 2}: {e}", exc_info=True)
+            logger.error(f"Error genérico procesando fila {index + 2}: {e}", exc_info=True)
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Error en la fila {index + 2} del Excel. Detalle: {e}")
-    db.commit()
+    
+    try:
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Error final al hacer commit de la transacción de Excel: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error al guardar los cambios en la base de datos: {e}")
+        
     return {"mensaje": "Archivo procesado exitosamente", "creados": trabajos_creados, "actualizados": trabajos_actualizados}

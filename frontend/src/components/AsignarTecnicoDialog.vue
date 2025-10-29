@@ -17,7 +17,7 @@
           emit-value
           map-options
           option-value="id"
-          option-label="nombre_completo"
+          option-label="nombre"
           :rules="[val => !!val || 'Debes seleccionar un técnico']"
         />
       </q-card-section>
@@ -32,15 +32,13 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useDialogPluginComponent, useQuasar } from 'quasar'
-import { api } from 'boot/axios'
+import { useDialogPluginComponent } from 'quasar'
+// 👇 CAMBIO AQUÍ: Importamos el servicio
+import { tecnicosService } from 'src/services/tecnicosService';
 
-// ✨ CORRECCIÓN: Esta línea es necesaria para que Quasar
-// maneje correctamente el ciclo de vida del diálogo (incluyendo 'unmount').
 defineEmits([...useDialogPluginComponent.emits])
 
 const { dialogRef, onDialogHide, onDialogOK, onDialogCancel } = useDialogPluginComponent()
-const $q = useQuasar()
 
 const tecnicoSeleccionado = ref(null)
 const opcionesTecnicos = ref([])
@@ -49,11 +47,12 @@ const isLoading = ref(false)
 onMounted(async () => {
   isLoading.value = true
   try {
-    const response = await api.get('/tecnicos/')
-    opcionesTecnicos.value = response.data
-  } catch {
-    $q.notify({ type: 'negative', message: 'No se pudo cargar la lista de técnicos.' })
-    onDialogCancel()
+    // 👇 CAMBIO AQUÍ: Usamos el servicio
+    opcionesTecnicos.value = await tecnicosService.getTecnicos()
+  } catch (error) {
+    // El servicio ya notifica el error
+    console.error('Error cargando técnicos en diálogo', error)
+    onDialogCancel() // Cerramos el diálogo si no se pueden cargar
   } finally {
     isLoading.value = false
   }

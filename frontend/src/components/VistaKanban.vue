@@ -82,9 +82,10 @@ import { useQuasar } from 'quasar';
 import draggable from 'vuedraggable';
 import { storeToRefs } from 'pinia';
 import { useTrabajosStore } from 'stores/trabajosStore';
-import { useWorkflow } from 'src/composables/useWorkflow';
-import MotivoDetencionDialog from 'components/MotivoDetencionDialog.vue';
-import AsignarTecnicoDialog from 'components/AsignarTecnicoDialog.vue';
+// 👇 YA NO NECESITAMOS ESTOS DIÁLOGOS AQUÍ
+// import { useWorkflow } from 'src/composables/useWorkflow';
+// import MotivoDetencionDialog from 'components/MotivoDetencionDialog.vue';
+// import AsignarTecnicoDialog from 'components/AsignarTecnicoDialog.vue';
 
 // Interfaces para tipado estricto
 interface Trabajo {
@@ -111,9 +112,11 @@ const emit = defineEmits<{
   (e: 'detalle', id: number | string): void;
 }>();
 
-const $q = useQuasar();
+// 👇 $q YA NO ES NECESARIO AQUÍ
+// const $q = useQuasar(); 
 const trabajosStore = useTrabajosStore();
-const { ESTADOS } = useWorkflow();
+// 👇 ESTADOS YA NO ES NECESARIO AQUÍ
+// const { ESTADOS } = useWorkflow();
 
 const { trabajos, isLoading } = storeToRefs(trabajosStore);
 
@@ -140,48 +143,29 @@ const formatDate = (value: string | null): string => {
   return new Date(value).toLocaleDateString('es-CL', options);
 };
 
+// 👇 FUNCIÓN SIMPLIFICADA
 const onDragEnd = async (event: DragEndEvent) => {
   const trabajoId = event.item.__draggable_context.element.id;
-  const nuevoEstado = event.to.getAttribute('data-estado-destino');
+  // Hacemos un casting a 'string' porque getAttribute siempre devuelve string
+  const nuevoEstado = event.to.getAttribute('data-estado-destino') as string;
   const estadoAnterior = event.from.getAttribute('data-estado-destino');
   
   if (!trabajoId || !nuevoEstado || nuevoEstado === estadoAnterior) {
-    await trabajosStore.fetchTrabajos(); // Revierte el cambio visual si es inválido
+    // No es un movimiento válido, vuedraggable lo revierte.
     return;
   }
 
-  let dialogData: Record<string, unknown> = {};
-  let proceed = true;
-
   try {
-    if (nuevoEstado === ESTADOS.DETENIDO) {
-      dialogData = await new Promise((resolve, reject) => {
-        $q.dialog({
-          component: MotivoDetencionDialog,
-          componentProps: { trabajoId: trabajoId }
-        }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
-      });
-    } else if (nuevoEstado === ESTADOS.EN_TRABAJO) {
-      dialogData = await new Promise((resolve, reject) => {
-        $q.dialog({
-          component: AsignarTecnicoDialog
-        }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
-      });
-    }
-  } catch {
-    proceed = false;
-  }
-  
-  if (proceed) {
-    const payload = { nuevo_estado: nuevoEstado, ...dialogData };
-    try {
-      await trabajosStore.updateEstado(trabajoId, payload);
-    } catch {
-      // Si la API falla, el store notifica y revertimos el cambio visual
-      await trabajosStore.fetchTrabajos();
-    }
-  } else {
-    // Si el usuario cancela un diálogo, revertimos el cambio visual
+    // Llamamos a la nueva acción centralizada.
+    // Esta acción maneja los diálogos y la llamada a la API.
+    await trabajosStore.manejarCambioDeEstado({
+      id: trabajoId,
+      nuevo_estado: nuevoEstado
+    });
+    // Si la promesa se resuelve, el cambio fue exitoso y el store se actualizó.
+  } catch (error) {
+    // Si la promesa falla (por cancelación de diálogo o error de API),
+    // forzamos una recarga de datos para revertir el cambio visual en el Kanban.
     await trabajosStore.fetchTrabajos();
   }
 };

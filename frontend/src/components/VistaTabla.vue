@@ -121,18 +121,17 @@ import { useTrabajosStore } from 'stores/trabajosStore';
 import { useWorkflow, Estado } from 'src/composables/useWorkflow';
 import { format, isPast, isToday, isTomorrow, formatDistanceToNowStrict } from 'date-fns';
 import { es } from 'date-fns/locale';
-import MotivoDetencionDialog from 'components/MotivoDetencionDialog.vue';
-import AsignarTecnicoDialog from 'components/AsignarTecnicoDialog.vue';
-// ✨ REFACTORIZACIÓN 1: Importamos el componente de diálogo centralizado
+// 👇 YA NO NECESITAMOS ESTOS DIÁLOGOS AQUÍ
+// import MotivoDetencionDialog from 'components/MotivoDetencionDialog.vue';
+// import AsignarTecnicoDialog from 'components/AsignarTecnicoDialog.vue';
 import HistorialTrabajoDialog from 'components/HistorialTrabajoDialog.vue';
 
 // --- Interfaces de Tipos ---
 interface EstadoHistorial {
   estado: Estado;
   fecha: string;
-  duracion?: string; // Ej: "2 días, 3 horas"
+  duracion?: string; 
 }
-
 interface Trabajo {
   id: number;
   dias_de_estadia_activa: number | null;
@@ -142,10 +141,9 @@ interface Trabajo {
   tecnico_asignado: { nombre_completo: string } | null;
   estado_actual: Estado;
   pedido_dbm: string;
-  historial_estados?: EstadoHistorial[]; // ✨ NUEVO: Para la línea de tiempo
+  historial_estados?: EstadoHistorial[];
   [key: string]: unknown;
 }
-
 interface Props {
   visibleColumns: string[]
 }
@@ -159,14 +157,11 @@ const emit = defineEmits<{
 // --- Composables y Stores ---
 const $q = useQuasar();
 const trabajosStore = useTrabajosStore();
-const { getEstadoColor, getNextStates, ESTADOS } = useWorkflow();
+// 👇 EXTRAEMOS ESTADOS DEL WORKFLOW
+const { getEstadoColor, getNextStates } = useWorkflow(); 
 const { trabajos, isLoading, pagination, updatingIds } = storeToRefs(trabajosStore);
 
-// --- ✨ LÓGICA PARA EL DIÁLOGO DE HISTORIAL (Refactorizada) ---
-
-// ✨ REFACTORIZACIÓN 2: Eliminamos los 'ref's de 'mostrarDialogoHistorial' y 'trabajoSeleccionado'
-
-// ✨ REFACTORIZACIÓN 3: La función ahora usa $q.dialog para llamar al componente reutilizable
+// --- Lógica para el Diálogo de Historial ---
 const abrirDialogoHistorial = (trabajo: Trabajo) => {
   $q.dialog({
     component: HistorialTrabajoDialog,
@@ -177,43 +172,19 @@ const abrirDialogoHistorial = (trabajo: Trabajo) => {
 };
 
 // --- Lógica Principal del Componente ---
+
+// 👇 FUNCIÓN SIMPLIFICADA
 const confirmarUpdateEstado = async (payload: { id: number | string, nuevo_estado: string }) => {
-  let dialogData: Record<string, unknown> = {};
-  let proceed = true;
-
   try {
-    if (payload.nuevo_estado === ESTADOS.DETENIDO) {
-      dialogData = await new Promise((resolve, reject) => {
-        $q.dialog({
-          component: MotivoDetencionDialog,
-          componentProps: { trabajoId: payload.id }
-        }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
-      });
-    } else if (payload.nuevo_estado === ESTADOS.EN_TRABAJO) {
-      dialogData = await new Promise((resolve, reject) => {
-        $q.dialog({
-          component: AsignarTecnicoDialog
-        }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
-      });
-    }
-  } catch {
-    proceed = false;
-  }
-
-  if (proceed) {
-    const finalPayload = { ...payload, ...dialogData };
-    if (payload.nuevo_estado === ESTADOS.ENTREGADO) {
-      $q.dialog({
-        title: 'Confirmar Acción',
-        message: `¿Está seguro de que desea marcar el trabajo como <strong>"${payload.nuevo_estado.replace(/_/g, ' ')}"</strong>?`,
-        html: true,
-        cancel: { label: 'Cancelar', flat: true },
-        ok: { label: 'Confirmar', color: 'primary' },
-      }).onOk(() => {
-        trabajosStore.updateEstado(payload.id as number, finalPayload);
-      });
-    } else {
-      trabajosStore.updateEstado(payload.id as number, finalPayload);
+    // La lógica de diálogos y confirmación ahora está en el store
+    await trabajosStore.manejarCambioDeEstado({
+      id: payload.id as number,
+      nuevo_estado: payload.nuevo_estado
+    });
+  } catch (error: any) {
+    // Si el error es por cancelación, no mostramos nada.
+    if (error.message !== 'Cambio de estado cancelado por el usuario.') {
+      console.error("Error al manejar cambio de estado:", error);
     }
   }
 };
@@ -233,9 +204,8 @@ const getAntiguedadColor = (dias: number | null): string => {
   return 'grey-7';
 };
 
-// ✨ FUNCIÓN DE ALERTAS ETA ACTUALIZADA
 const getEtaStatus = (etaFecha: string | null): { color: string, label: string } | null => {
-  if (!etaFecha) return null; // No retorna nada si no hay fecha
+  if (!etaFecha) return null; 
   const etaDate = new Date(etaFecha);
 
   if (isPast(etaDate)) {

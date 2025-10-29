@@ -1,7 +1,12 @@
 import { defineStore } from 'pinia';
-import { Notify } from 'quasar';
+import { Notify, useQuasar } from 'quasar';
 import { trabajosService } from 'src/services/trabajosService';
 import type { Estado } from 'src/composables/useWorkflow';
+// 👇 AÑADIMOS IMPORTACIONES
+import { useWorkflow } from 'src/composables/useWorkflow';
+import MotivoDetencionDialog from 'components/MotivoDetencionDialog.vue';
+import AsignarTecnicoDialog from 'components/AsignarTecnicoDialog.vue';
+
 
 // --- DEFINICIÓN DE TIPOS ---
 // ... (los tipos se mantienen igual)
@@ -102,7 +107,8 @@ export const useTrabajosStore = defineStore('trabajos', {
     },
 
     /**
-     * Actualiza el estado de un trabajo específico.
+     * ACCIÓN INTERNA: Actualiza el estado en la API.
+     * Esta acción es llamada por 'manejarCambioDeEstado' después de las confirmaciones.
      */
     async updateEstado(id: number, payload: Record<string, any>) {
       this.updatingIds.add(id);
@@ -117,25 +123,85 @@ export const useTrabajosStore = defineStore('trabajos', {
           const trabajoIndex = this.trabajos.findIndex(t => t.id === id);
           if (trabajoIndex !== -1) {
             
-            // ✨ CORRECCIÓN PARA LAS ALERTAS ETA:
-            // En lugar de un reemplazo directo ( this.trabajos[trabajoIndex] = response.data; ),
-            // fusionamos el estado anterior, la respuesta del servidor y el payload.
-            // Esto asegura que campos como 'eta_fecha' del payload se mantengan
-            // aunque el 'response.data' del servidor no los incluya.
             this.trabajos[trabajoIndex] = {
-              ...this.trabajos[trabajoIndex], // 1. Mantenemos los datos antiguos
-              ...response.data,             // 2. Sobrescribimos con la respuesta del servidor (ej. estado_actual)
-              ...payload                    // 3. Sobrescribimos con el payload (ej. eta_fecha, eta_motivo)
+              ...this.trabajos[trabajoIndex], 
+              ...response.data,             
+              ...payload                    
             };
           }
         }
+        return true; // Indicar éxito
       } catch (error: any) {
         Notify.create({ type: 'negative', message: 'No se pudo actualizar el estado.', caption: error.response?.data?.detail });
-        throw error; // Relanzamos el error para que el componente pueda manejarlo si es necesario.
+        throw error; // Relanzamos el error para que el componente pueda manejarlo
       } finally {
         this.updatingIds.delete(id);
       }
     },
+
+    /**
+     * ACCIÓN PRINCIPAL: Maneja la lógica de cambio de estado, incluyendo diálogos.
+     * Esta es la acción que deben llamar los componentes.
+     */
+    async manejarCambioDeEstado(payload: { id: number; nuevo_estado: string }) {
+      const { id, nuevo_estado } = payload;
+      const { ESTADOS } = useWorkflow();
+      const $q = useQuasar(); // Obtenemos $q
+      
+      let dialogData: Record<string, unknown> = {};
+      let proceed = true;
+
+      try {
+        if (nuevo_estado === ESTADOS.DETENIDO) {
+          dialogData = await new Promise((resolve, reject) => {
+            $q.dialog({
+              component: MotivoDetencionDialog,
+              componentProps: { trabajoId: id }
+            }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
+          });
+        } else if (nuevo_estado === ESTADOS.EN_TRABAJO) {
+          dialogData = await new Promise((resolve, reject) => {
+            $q.dialog({
+              component: AsignarTecnicoDialog
+            }).onOk(resolve).onCancel(() => reject(new Error('Dialogo cancelado')));
+          });
+        }
+      } catch (err) {
+        // El usuario canceló un diálogo
+        proceed = false;
+      }
+
+      if (!proceed) {
+        // Lanzamos un error para que el componente (Kanban) sepa que debe revertir.
+        throw new Error('Cambio de estado cancelado por el usuario.');
+      }
+
+      // Si el estado es "entregado", pedimos confirmación simple
+      if (nuevo_estado === ESTADOS.ENTREGADO) {
+        proceed = await new Promise((resolve) => {
+           $q.dialog({
+            title: 'Confirmar Acción',
+            message: `¿Está seguro de que desea marcar el trabajo como <strong>"${nuevo_estado.replace(/_/g, ' ')}"</strong>?`,
+            html: true,
+            cancel: { label: 'Cancelar', flat: true },
+            ok: { label: 'Confirmar', color: 'primary' },
+          }).onOk(() => resolve(true))
+            .onCancel(() => resolve(false));
+        });
+      }
+
+      if (!proceed) {
+        throw new Error('Cambio de estado cancelado por el usuario.');
+      }
+
+      // Si todo está bien, creamos el payload final y llamamos a updateEstado
+      const finalPayload = { nuevo_estado, ...dialogData };
+      
+      // 'updateEstado' ya maneja el try/catch de la API y las notificaciones
+      // Simplemente lo llamamos y dejamos que propague el éxito o el error.
+      return this.updateEstado(id, finalPayload);
+    },
+
 
     /**
      * Actualiza la descripción de la tarea de un trabajo.
@@ -148,7 +214,6 @@ export const useTrabajosStore = defineStore('trabajos', {
 
           const trabajoIndex = this.trabajos.findIndex(t => t.id === id);
           if (trabajoIndex !== -1) {
-              // ✨ BUENA PRÁCTICA: Hacemos la misma fusión aquí por consistencia.
               this.trabajos[trabajoIndex] = {
                 ...this.trabajos[trabajoIndex],
                 ...response.data,
