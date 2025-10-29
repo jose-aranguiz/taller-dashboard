@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Body, status, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func, inspect
+# 👇 IMPORTACIÓN MODIFICADA
+from sqlalchemy import or_, func, inspect, select
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional, Dict, Any, Tuple
 import models, schemas, auth
 from database import SessionLocal
 import datetime
 import pandas as pd
-from pandas import DataFrame # <-- Importamos DataFrame para type hints
+from pandas import DataFrame
 import io
 import logging
 
@@ -21,7 +22,6 @@ VALID_TRANSITIONS = {
     "listo para entrega": ["entregado al cliente"], "entregado al cliente": []
 }
 
-# --- MAPEADO DE COLUMNAS (Ahora es una constante global) ---
 COLUMN_MAPPING = {
     'Pedido DBM': 'pedido_dbm',
     'Motivo de pedido': 'tipo_pedido',
@@ -45,8 +45,7 @@ def get_db():
     finally:
         db.close()
 
-# --- RUTAS DE TRABAJOS (leer_trabajos_paginados, actualizar_trabajo, etc.) ---
-# ... (Estas funciones se mantienen idénticas a como las dejamos en el Paso 2) ...
+# --- 6️⃣ INICIO DE REFACTORIZACIÓN (OPTIMIZACIÓN N+1) ---
 
 @router.get("/", response_model=schemas.PaginatedTrabajos)
 def leer_trabajos_paginados(
@@ -65,8 +64,34 @@ def leer_trabajos_paginados(
     current_user: schemas.User = Depends(auth.get_current_user)
 ):
     try:
-        query = db.query(models.Trabajo)
+        # --- 👇 SUB CONSULTA PARA CALCULAR TIEMPO DETENIDO ---
+        # Esto crea una subconsulta que se ejecutará por cada fila de 'Trabajo'
+        # en la base de datos, lo cual es mucho más eficiente que hacerlo en Python.
+        tiempo_detenido_subquery = (
+            select(
+                func.sum(
+                    func.extract(
+                        "epoch",
+                        func.coalesce(models.HistorialDeEstado.fecha_fin, func.now()) - models.HistorialDeEstado.fecha_inicio
+                    )
+                )
+            )
+            .where(
+                models.HistorialDeEstado.trabajo_id == models.Trabajo.id,
+                models.HistorialDeEstado.estado == 'trabajo detenido'
+            )
+            .correlate(models.Trabajo) # <-- Enlaza esta subconsulta al 'models.Trabajo' de la consulta principal
+            .as_scalar()
+        )
 
+        # --- 👇 CONSULTA PRINCIPAL MODIFICADA ---
+        # Ahora seleccionamos el objeto Trabajo Y el resultado de la subconsulta
+        query = db.query(
+            models.Trabajo,
+            func.coalesce(tiempo_detenido_subquery, 0).label("tiempo_detenido_segundos")
+        )
+
+        # --- LÓGICA DE FILTRADO (SIN CAMBIOS) ---
         if patente:
             query = query.filter(models.Trabajo.patente.ilike(f"%{patente}%")).order_by(models.Trabajo.fecha_creacion_pedido.desc())
         else:
@@ -91,8 +116,10 @@ def leer_trabajos_paginados(
             if fecha_hasta:
                 query = query.filter(models.Trabajo.fecha_creacion_pedido < fecha_hasta + datetime.timedelta(days=1))
 
+        # --- CONTEO (SIN CAMBIOS) ---
         total_records = query.count()
 
+        # --- ORDENAMIENTO (SIN CAMBIOS) ---
         if sort_by and hasattr(models.Trabajo, sort_by):
             columna_a_ordenar = getattr(models.Trabajo, sort_by)
             if sort_order.lower() == "desc":
@@ -101,13 +128,20 @@ def leer_trabajos_paginados(
                 query = query.order_by(columna_a_ordenar.asc())
         
         offset = (page - 1) * limit
-        items = query.offset(offset).limit(limit).all()
         
-        for trabajo in items:
+        # --- 👇 OBTENCIÓN DE ITEMS (Ahora devuelve tuplas) ---
+        items_con_tiempo = query.offset(offset).limit(limit).all()
+        
+        # --- 👇 CÁLCULO DE DÍAS (MODIFICADO) ---
+        items = [] # Creamos una lista limpia de 'trabajos'
+        
+        # Desempaquetamos la tupla: (objeto Trabajo, valor_subconsulta)
+        for trabajo, tiempo_detenido_segundos in items_con_tiempo:
             try:
                 fecha_inicio_conteo = trabajo.fecha_llegada_taller or trabajo.fecha_creacion_pedido
                 if not fecha_inicio_conteo:
                     trabajo.dias_de_estadia_activa = 0
+                    items.append(trabajo)
                     continue
 
                 if hasattr(fecha_inicio_conteo, 'tzinfo') and fecha_inicio_conteo.tzinfo is not None:
@@ -115,17 +149,18 @@ def leer_trabajos_paginados(
 
                 tiempo_total_segundos = (datetime.datetime.utcnow() - fecha_inicio_conteo).total_seconds()
                 
-                tiempo_detenido_segundos = db.query(
-                    func.sum(func.extract('epoch', func.coalesce(models.HistorialDeEstado.fecha_fin, func.now()) - models.HistorialDeEstado.fecha_inicio))
-                ).filter(
-                    models.HistorialDeEstado.trabajo_id == trabajo.id,
-                    models.HistorialDeEstado.estado == 'trabajo detenido'
-                ).scalar() or 0
+                # --- 🛑 CONSULTA N+1 ELIMINADA 🛑 ---
+                # Ya no necesitamos esto, 'tiempo_detenido_segundos'
+                # viene de la consulta principal.
+                
                 tiempo_activo_segundos = tiempo_total_segundos - tiempo_detenido_segundos
                 trabajo.dias_de_estadia_activa = int(tiempo_activo_segundos / (24 * 3600)) if tiempo_activo_segundos > 0 else 0
+            
             except Exception as e:
                 logger.error(f"Error calculando días de estadía para trabajo ID {trabajo.id}: {e}")
                 trabajo.dias_de_estadia_activa = -1
+            
+            items.append(trabajo) # Añadimos el trabajo (ya modificado) a la lista
 
         return {"items": items, "total": total_records}
 
@@ -135,6 +170,8 @@ def leer_trabajos_paginados(
     except Exception as e:
         logger.error(f"Error inesperado en leer_trabajos_paginados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Ocurrió un error inesperado en el servidor al listar los trabajos.")
+
+# --- 6️⃣ FIN DE REFACTORIZACIÓN (OPTIMIZACIÓN N+1) ---
 
 
 @router.patch("/{trabajo_id}", response_model=schemas.Trabajo)
@@ -213,7 +250,7 @@ def leer_historial_trabajo(
     return sorted(trabajo.historial, key=lambda x: x.fecha_inicio)
 
 
-# --- 5️⃣ INICIO DE REFACTORIZACIÓN DE CARGA DE EXCEL ---
+# --- Funciones auxiliares de carga de Excel (del Paso 5) ---
 
 def _buscar_fila_encabezado(df_temp: DataFrame) -> int:
     """Busca la fila que contiene el encabezado 'Pedido DBM'."""
@@ -244,7 +281,6 @@ def _limpiar_dataframe(df: DataFrame) -> DataFrame:
     if 'total_pedido' in df.columns:
         df['total_pedido'] = pd.to_numeric(df['total_pedido'], errors='coerce')
 
-    # Un pedido DBM válido es esencial
     df.dropna(subset=['pedido_dbm'], inplace=True)
     df['pedido_dbm'] = df['pedido_dbm'].astype(int)
     return df
@@ -268,15 +304,13 @@ def _procesar_filas_dataframe(db: Session, df: DataFrame) -> Tuple[int, int]:
             else:
                 nuevo_trabajo = models.Trabajo(**datos_trabajo, estado_actual="agendado")
                 db.add(nuevo_trabajo)
-                db.flush() # Obtenemos el ID del nuevo trabajo
+                db.flush() 
                 historial_inicial = models.HistorialDeEstado(trabajo_id=nuevo_trabajo.id, estado="agendado")
                 db.add(historial_inicial)
                 trabajos_creados += 1
         
         except Exception as e:
-            # Manejamos el error de una fila específica y continuamos
             logger.error(f"Error procesando fila {index + 2}: {e}", exc_info=True)
-            # Damos un error detallado. El 'raise' detendrá toda la importación.
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
                 detail=f"Error en la fila {index + 2} del Excel (Pedido DBM: {row.get('pedido_dbm', 'N/A')}). Detalle: {e}"
@@ -293,14 +327,12 @@ async def cargar_trabajos_desde_excel(
 ):
     """
     Ruta principal para cargar trabajos desde un archivo Excel.
-    Ahora actúa como un coordinador, llamando a funciones auxiliares.
     """
     if not file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de archivo inválido. Se requiere .xlsx o .xls")
     
     contenido_bytes = await file.read()
     
-    # --- 1. Leer y encontrar encabezado ---
     try:
         df_temp = pd.read_excel(io.BytesIO(contenido_bytes), header=None, engine=None)
         header_row_index = _buscar_fila_encabezado(df_temp)
@@ -316,18 +348,11 @@ async def cargar_trabajos_desde_excel(
             raise e
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se pudo leer el archivo Excel: {e}")
 
-    # --- 2. Validar y renombrar ---
-    # (Esta función puede lanzar HTTPException si faltan columnas)
     df = _validar_y_renombrar_columnas(df)
-    
-    # --- 3. Limpiar Datos ---
     df = _limpiar_dataframe(df)
 
-    # --- 4. Procesar filas y guardar en BBDD ---
     try:
         trabajos_creados, trabajos_actualizados = _procesar_filas_dataframe(db, df)
-        
-        # Si todo salió bien, hacemos commit
         db.commit()
         
     except (SQLAlchemyError, HTTPException) as e:
@@ -342,5 +367,3 @@ async def cargar_trabajos_desde_excel(
         raise HTTPException(status_code=500, detail=f"Error inesperado al procesar filas: {e}")
 
     return {"mensaje": "Archivo procesado exitosamente", "creados": trabajos_creados, "actualizados": trabajos_actualizados}
-
-# --- 5️⃣ FIN DE REFACTORIZACIÓN DE CARGA DE EXCEL ---
