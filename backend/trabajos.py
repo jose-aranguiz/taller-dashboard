@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Body, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func, inspect
-from sqlalchemy.exc import SQLAlchemyError  # <--- IMPORTANTE: Importamos el error específico
-from typing import List, Optional
+from sqlalchemy.exc import SQLAlchemyError
+from typing import List, Optional, Dict, Any, Tuple
 import models, schemas, auth
 from database import SessionLocal
 import datetime
 import pandas as pd
+from pandas import DataFrame # <-- Importamos DataFrame para type hints
 import io
 import logging
 
@@ -20,6 +21,21 @@ VALID_TRANSITIONS = {
     "listo para entrega": ["entregado al cliente"], "entregado al cliente": []
 }
 
+# --- MAPEADO DE COLUMNAS (Ahora es una constante global) ---
+COLUMN_MAPPING = {
+    'Pedido DBM': 'pedido_dbm',
+    'Motivo de pedido': 'tipo_pedido',
+    'Fecha documento': 'fecha_creacion_pedido',
+    'Nombre consultor técnico': 'asesor_servicio',
+    'Matr.vehículo': 'patente',
+    'Sector': 'marca',
+    'Descripción del modelo de vehículo': 'modelo_vehiculo',
+    'Nº identificación vehículo': 'vin',
+    'Nombre del cliente': 'cliente_nombre',
+    'Descripción de tarea': 'detalle_pedido',
+    'Valor neto': 'total_pedido'
+}
+
 router = APIRouter(prefix="/trabajos", tags=["Trabajos"])
 
 def get_db():
@@ -28,6 +44,9 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# --- RUTAS DE TRABAJOS (leer_trabajos_paginados, actualizar_trabajo, etc.) ---
+# ... (Estas funciones se mantienen idénticas a como las dejamos en el Paso 2) ...
 
 @router.get("/", response_model=schemas.PaginatedTrabajos)
 def leer_trabajos_paginados(
@@ -41,21 +60,16 @@ def leer_trabajos_paginados(
     estado_actual: Optional[str] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
     fecha_hasta: Optional[datetime.date] = Query(None),
-    # --- ✨ NUEVOS PARÁMETROS PARA HISTORIAL ---
     activos: bool = True,
     patente: Optional[str] = None,
-    # ----------------------------------------
     current_user: schemas.User = Depends(auth.get_current_user)
 ):
     try:
         query = db.query(models.Trabajo)
 
-        # --- ✨ LÓGICA DE FILTRADO MODIFICADA ---
         if patente:
-            # Si se busca una patente, se obtiene todo su historial sin paginación.
             query = query.filter(models.Trabajo.patente.ilike(f"%{patente}%")).order_by(models.Trabajo.fecha_creacion_pedido.desc())
         else:
-            # Lógica para la vista principal (activos) y la página de historial (inactivos)
             if activos:
                 query = query.filter(models.Trabajo.estado_actual != 'entregado al cliente')
             else:
@@ -76,7 +90,6 @@ def leer_trabajos_paginados(
                 query = query.filter(models.Trabajo.fecha_creacion_pedido >= fecha_desde)
             if fecha_hasta:
                 query = query.filter(models.Trabajo.fecha_creacion_pedido < fecha_hasta + datetime.timedelta(days=1))
-        # ------------------------------------
 
         total_records = query.count()
 
@@ -90,7 +103,6 @@ def leer_trabajos_paginados(
         offset = (page - 1) * limit
         items = query.offset(offset).limit(limit).all()
         
-        # --- Cálculo de días de estadía (se mantiene igual) ---
         for trabajo in items:
             try:
                 fecha_inicio_conteo = trabajo.fecha_llegada_taller or trabajo.fecha_creacion_pedido
@@ -112,14 +124,11 @@ def leer_trabajos_paginados(
                 tiempo_activo_segundos = tiempo_total_segundos - tiempo_detenido_segundos
                 trabajo.dias_de_estadia_activa = int(tiempo_activo_segundos / (24 * 3600)) if tiempo_activo_segundos > 0 else 0
             except Exception as e:
-                # Este 'except Exception' es aceptable aquí, porque no queremos
-                # que un error de cálculo en un solo trabajo detenga toda la lista.
                 logger.error(f"Error calculando días de estadía para trabajo ID {trabajo.id}: {e}")
                 trabajo.dias_de_estadia_activa = -1
 
         return {"items": items, "total": total_records}
 
-    # --- 👇 MEJORA DE MANEJO DE ERRORES AQUÍ 👇 ---
     except SQLAlchemyError as e:
         logger.error(f"Error de base de datos en leer_trabajos_paginados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error de base de datos al consultar trabajos.")
@@ -127,7 +136,6 @@ def leer_trabajos_paginados(
         logger.error(f"Error inesperado en leer_trabajos_paginados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Ocurrió un error inesperado en el servidor al listar los trabajos.")
 
-# --- EL RESTO DE LAS RUTAS SE MANTIENEN IGUAL ---
 
 @router.patch("/{trabajo_id}", response_model=schemas.Trabajo)
 def actualizar_trabajo(
@@ -204,59 +212,28 @@ def leer_historial_trabajo(
         raise HTTPException(status_code=404, detail="Trabajo no encontrado")
     return sorted(trabajo.historial, key=lambda x: x.fecha_inicio)
 
-@router.post("/upload-excel/", response_model=schemas.UploadResponse, status_code=status.HTTP_201_CREATED)
-async def cargar_trabajos_desde_excel(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_user)
-):
-    if not file.filename.lower().endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de archivo inválido. Se requiere .xlsx o .xls")
-    
-    contenido_bytes = await file.read()
-    
-    try:
-        df_temp = pd.read_excel(io.BytesIO(contenido_bytes), header=None, engine=None)
-        header_row_index = -1
-        for i, row in df_temp.head(10).iterrows():
-            if 'Pedido DBM' in row.values:
-                header_row_index = i
-                break
-        
-        if header_row_index == -1:
-            raise HTTPException(status_code=422, detail="No se pudo encontrar la fila de encabezado. Asegúrate que la columna 'Pedido DBM' exista.")
 
-        df = pd.read_excel(io.BytesIO(contenido_bytes), header=header_row_index, engine=None)
+# --- 5️⃣ INICIO DE REFACTORIZACIÓN DE CARGA DE EXCEL ---
 
-    except Exception as e:
-        # Este 'except Exception' está bien aquí, ya que leer un archivo puede fallar
-        # por muchas razones (archivo corrupto, mal formato, etc.) y queremos 
-        # reportarlo como un error de "mala solicitud" (400).
-        logger.error(f"Error al leer o procesar el Excel: {e}", exc_info=True)
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se pudo leer el archivo Excel: {e}")
+def _buscar_fila_encabezado(df_temp: DataFrame) -> int:
+    """Busca la fila que contiene el encabezado 'Pedido DBM'."""
+    for i, row in df_temp.head(10).iterrows():
+        if 'Pedido DBM' in row.values:
+            return i
+    return -1
 
-    column_mapping = {
-        'Pedido DBM': 'pedido_dbm',
-        'Motivo de pedido': 'tipo_pedido',
-        'Fecha documento': 'fecha_creacion_pedido',
-        'Nombre consultor técnico': 'asesor_servicio',
-        'Matr.vehículo': 'patente',
-        'Sector': 'marca',
-        'Descripción del modelo de vehículo': 'modelo_vehiculo',
-        'Nº identificación vehículo': 'vin',
-        'Nombre del cliente': 'cliente_nombre',
-        'Descripción de tarea': 'detalle_pedido',
-        'Valor neto': 'total_pedido'
-    }
-
-    missing_cols = [col for col in column_mapping.keys() if col not in df.columns]
+def _validar_y_renombrar_columnas(df: DataFrame) -> DataFrame:
+    """Valida que las columnas necesarias existan y las renombra."""
+    missing_cols = [col for col in COLUMN_MAPPING.keys() if col not in df.columns]
     if missing_cols:
+        logger.error(f"Faltan columnas en el Excel: {missing_cols}")
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Faltan las siguientes columnas en el Excel: {', '.join(missing_cols)}")
-
-    df.rename(columns=column_mapping, inplace=True)
     
+    df.rename(columns=COLUMN_MAPPING, inplace=True)
+    return df
+
+def _limpiar_dataframe(df: DataFrame) -> DataFrame:
+    """Convierte tipos de datos (fechas, números) y limpia datos nulos."""
     date_columns = ['fecha_creacion_pedido']
     for col in date_columns:
         if col in df.columns:
@@ -267,9 +244,13 @@ async def cargar_trabajos_desde_excel(
     if 'total_pedido' in df.columns:
         df['total_pedido'] = pd.to_numeric(df['total_pedido'], errors='coerce')
 
+    # Un pedido DBM válido es esencial
     df.dropna(subset=['pedido_dbm'], inplace=True)
     df['pedido_dbm'] = df['pedido_dbm'].astype(int)
+    return df
 
+def _procesar_filas_dataframe(db: Session, df: DataFrame) -> Tuple[int, int]:
+    """Itera sobre el DataFrame y crea/actualiza trabajos en la base de datos."""
     trabajos_creados, trabajos_actualizados = 0, 0
     db_model_columns = {c.name for c in inspect(models.Trabajo).c}
 
@@ -277,7 +258,9 @@ async def cargar_trabajos_desde_excel(
         try:
             pedido_dbm_str = str(row['pedido_dbm'])
             datos_trabajo = {key: value for key, value in row.items() if key in db_model_columns and pd.notna(value)}
+            
             trabajo_existente = db.query(models.Trabajo).filter(models.Trabajo.pedido_dbm == pedido_dbm_str).first()
+            
             if trabajo_existente:
                 for key, value in datos_trabajo.items():
                     setattr(trabajo_existente, key, value)
@@ -285,28 +268,79 @@ async def cargar_trabajos_desde_excel(
             else:
                 nuevo_trabajo = models.Trabajo(**datos_trabajo, estado_actual="agendado")
                 db.add(nuevo_trabajo)
-                db.flush()
+                db.flush() # Obtenemos el ID del nuevo trabajo
                 historial_inicial = models.HistorialDeEstado(trabajo_id=nuevo_trabajo.id, estado="agendado")
                 db.add(historial_inicial)
                 trabajos_creados += 1
         
-        # --- 👇 MEJORA DE MANEJO DE ERRORES AQUÍ 👇 ---
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Error de Base de Datos procesando fila {index + 2}: {e}", exc_info=True)
-            # Damos un error un poco más detallado al cliente
-            error_detail = str(e.__cause__ or e).split('\n')[0] # Tomamos la primera línea del error de DB
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Error de BD en la fila {index + 2}. Detalle: {error_detail}")
         except Exception as e:
-            db.rollback()
-            logger.error(f"Error genérico procesando fila {index + 2}: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Error en la fila {index + 2} del Excel. Detalle: {e}")
+            # Manejamos el error de una fila específica y continuamos
+            logger.error(f"Error procesando fila {index + 2}: {e}", exc_info=True)
+            # Damos un error detallado. El 'raise' detendrá toda la importación.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+                detail=f"Error en la fila {index + 2} del Excel (Pedido DBM: {row.get('pedido_dbm', 'N/A')}). Detalle: {e}"
+            )
+            
+    return trabajos_creados, trabajos_actualizados
+
+
+@router.post("/upload-excel/", response_model=schemas.UploadResponse, status_code=status.HTTP_201_CREATED)
+async def cargar_trabajos_desde_excel(
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_user)
+):
+    """
+    Ruta principal para cargar trabajos desde un archivo Excel.
+    Ahora actúa como un coordinador, llamando a funciones auxiliares.
+    """
+    if not file.filename.lower().endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de archivo inválido. Se requiere .xlsx o .xls")
     
+    contenido_bytes = await file.read()
+    
+    # --- 1. Leer y encontrar encabezado ---
     try:
-        db.commit()
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error(f"Error final al hacer commit de la transacción de Excel: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error al guardar los cambios en la base de datos: {e}")
+        df_temp = pd.read_excel(io.BytesIO(contenido_bytes), header=None, engine=None)
+        header_row_index = _buscar_fila_encabezado(df_temp)
         
+        if header_row_index == -1:
+            raise HTTPException(status_code=422, detail="No se pudo encontrar la fila de encabezado. Asegúrate que la columna 'Pedido DBM' exista.")
+
+        df = pd.read_excel(io.BytesIO(contenido_bytes), header=header_row_index, engine=None)
+
+    except Exception as e:
+        logger.error(f"Error al leer o procesar el Excel: {e}", exc_info=True)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se pudo leer el archivo Excel: {e}")
+
+    # --- 2. Validar y renombrar ---
+    # (Esta función puede lanzar HTTPException si faltan columnas)
+    df = _validar_y_renombrar_columnas(df)
+    
+    # --- 3. Limpiar Datos ---
+    df = _limpiar_dataframe(df)
+
+    # --- 4. Procesar filas y guardar en BBDD ---
+    try:
+        trabajos_creados, trabajos_actualizados = _procesar_filas_dataframe(db, df)
+        
+        # Si todo salió bien, hacemos commit
+        db.commit()
+        
+    except (SQLAlchemyError, HTTPException) as e:
+        db.rollback()
+        logger.error(f"Error al procesar las filas del DataFrame y guardar en BBDD: {e}", exc_info=True)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error de base de datos durante el procesamiento: {e}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error inesperado al procesar filas: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error inesperado al procesar filas: {e}")
+
     return {"mensaje": "Archivo procesado exitosamente", "creados": trabajos_creados, "actualizados": trabajos_actualizados}
+
+# --- 5️⃣ FIN DE REFACTORIZACIÓN DE CARGA DE EXCEL ---
