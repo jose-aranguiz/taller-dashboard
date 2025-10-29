@@ -1,6 +1,7 @@
-// src/router/routes.js
+// src/router/routes.ts
+import { RouteRecordRaw } from 'vue-router';
 
-const routes = [
+const routes: RouteRecordRaw[] = [
   // --- GRUPO DE RUTAS PRIVADAS ---
   {
     path: '/',
@@ -13,9 +14,9 @@ const routes = [
       {
         path: 'admin/tecnicos',
         component: () => import('pages/TecnicosPage.vue'),
-        meta: { requiresAdmin: true }
-      }
-    ]
+        meta: { requiresAdmin: true },
+      },
+    ],
   },
 
   // --- GRUPO DE RUTAS PÚBLICAS (MODIFICADO) ---
@@ -26,21 +27,20 @@ const routes = [
     children: [
       {
         path: 'login', // La ruta completa será /login
-        component: () => import('pages/LoginPage.vue')
+        component: () => import('pages/LoginPage.vue'),
       },
       {
         path: 'register', // La ruta completa será /register
-        component: () => import('pages/RegisterPage.vue')
-      }
-    ]
+        component: () => import('pages/RegisterPage.vue'),
+      },
+    ],
   },
-
 
   // --- RUTA CATCH-ALL (404) ---
   {
     path: '/:catchAll(.*)*',
-    component: () => import('pages/ErrorNotFound.vue')
-  }
+    component: () => import('pages/ErrorNotFound.vue'),
+  },
 ];
 
 export default routes;
