@@ -1,82 +1,60 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm 
 from sqlalchemy.orm import Session
 from datetime import timedelta
 from jose import JWTError, jwt
 
 import crud, models, schemas, security
-from database import SessionLocal
+from database import get_db, SessionLocal 
 
-router = APIRouter(prefix="/auth", tags=["Autenticación"])
+router = APIRouter(tags=["Auth"]) 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-@router.post("/users/", response_model=schemas.User)
+@router.post("/register/", response_model=schemas.User, status_code=status.HTTP_201_CREATED) 
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    """Endpoint para registrar un nuevo usuario."""
     db_user = crud.get_user_by_username(db, username=user.username)
     if db_user:
-        raise HTTPException(status_code=400, detail="El nombre de usuario ya está registrado")
+        raise HTTPException(status_code=400, detail="Username already registered")
+    db_user_email = crud.get_user_by_email(db, email=user.email)
+    if db_user_email:
+         raise HTTPException(status_code=400, detail="Email already registered")
     return crud.create_user(db=db, user=user)
 
-@router.post("/token")
+@router.post("/token", response_model=schemas.Token) 
 def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    """Endpoint para iniciar sesión y obtener un token."""
-    print("--- LOGIN ATTEMPT ---")
-    print(f"Attempting login for username: '{form_data.username}'")
-
-    user = crud.get_user_by_username(db, username=form_data.username)
-
+    # 👇 Ahora esta función sí existe en security.py
+    user = security.authenticate_user(db, form_data.username, form_data.password) 
     if not user:
-        print("DEBUG: User not found in database.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Nombre de usuario o contraseña incorrectos",
+            detail="Incorrect username or password", 
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    print(f"DEBUG: User '{user.username}' found in database.")
-    print(f"DEBUG: Hashed password from DB: {user.hashed_password}")
-    
-    is_password_correct = security.verify_password(form_data.password, user.hashed_password)
-    
-    print(f"DEBUG: Password verification result: {is_password_correct}")
-
-    if not is_password_correct:
-        print("DEBUG: Password verification FAILED.")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Nombre de usuario o contraseña incorrectos",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    print("DEBUG: Password verification SUCCEEDED.")
     
     access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.username, "role": user.role}, expires_delta=access_token_expires 
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "user": user} 
 
-async def get_current_user(token: str = Depends(security.oauth2_scheme), db: Session = Depends(get_db)):
+# --- Dependencias para obtener usuario actual ---
+# Usamos el oauth2_scheme definido en security.py
+oauth2_scheme = security.oauth2_scheme 
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="No se pudieron validar las credenciales",
+        detail="Could not validate credentials", 
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
         payload = jwt.decode(token, security.SECRET_KEY, algorithms=[security.ALGORITHM])
-        username: str = payload.get("sub")
+        username: str | None = payload.get("sub") 
         if username is None:
             raise credentials_exception
+        # token_data = schemas.TokenData(username=username) # Opcional
     except JWTError:
         raise credentials_exception
     
@@ -85,18 +63,19 @@ async def get_current_user(token: str = Depends(security.oauth2_scheme), db: Ses
         raise credentials_exception
     return user
 
-@router.get("/users/me", response_model=schemas.User)
-async def read_users_me(current_user: models.User = Depends(get_current_user)):
-    """Devuelve los datos del usuario actualmente logueado."""
+async def get_current_active_user(current_user: models.User = Depends(get_current_user)):
+    # Lógica de usuario activo/inactivo (si la hubiera)
     return current_user
 
-async def get_current_admin_user(current_user: models.User = Depends(get_current_user)):
-    """
-    Dependencia que verifica si el usuario actual es un administrador.
-    """
+async def get_current_admin_user(current_user: models.User = Depends(get_current_active_user)):
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes los permisos necesarios para esta operación."
+            detail="The user doesn't have enough privileges" 
         )
+    return current_user
+
+# --- Endpoint /users/me ---
+@router.get("/users/me/", response_model=schemas.User)
+async def read_users_me(current_user: models.User = Depends(get_current_active_user)):
     return current_user

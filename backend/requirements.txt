@@ -1,13 +1,19 @@
 fastapi
 uvicorn[standard]
+sqlalchemy
 psycopg2-binary
-SQLAlchemy
-python-dotenv
+pydantic[email]
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
 pandas
 openpyxl
-python-multipart
 celery
 redis
-passlib==1.7.4
+python-dotenv
+
+# --- Dependencias de Testing (Añadidas en Paso 8) ---
+pytest
+pytest-asyncio
+httpx
 bcrypt==3.2.0
-python-jose[cryptography]

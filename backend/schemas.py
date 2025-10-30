@@ -96,3 +96,14 @@ class User(UserBase):
 class UserSettings(BaseModel):
     column_config: Optional[Any] = None
     model_config = ConfigDict(from_attributes=True)
+
+# --- Añadido en Paso 8 ---
+class TokenData(BaseModel):
+    username: str | None = None
+    role: str | None = None # Añadimos el rol para usos futuros si es necesario
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: User # Incluimos los datos del usuario en la respuesta del token

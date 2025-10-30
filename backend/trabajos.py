@@ -1,16 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Body, status, Query
 from sqlalchemy.orm import Session
-# 👇 IMPORTACIÓN MODIFICADA
 from sqlalchemy import or_, func, inspect, select
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional, Dict, Any, Tuple
 import models, schemas, auth
-from database import SessionLocal
+# 👇 CORRECCIÓN AQUÍ: Importamos get_db
+from database import SessionLocal, get_db
 import datetime
 import pandas as pd
-from pandas import DataFrame
+from pandas import DataFrame 
 import io
 import logging
+
+# ... (el resto del archivo trabajos.py se mantiene exactamente igual que en el Paso 6) ...
+
+# --- Asegúrate de que TODAS las funciones que usan Depends(get_db) ---
+# --- estén DESPUÉS de la línea de importación ---
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,18 +43,12 @@ COLUMN_MAPPING = {
 
 router = APIRouter(prefix="/trabajos", tags=["Trabajos"])
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# --- 6️⃣ INICIO DE REFACTORIZACIÓN (OPTIMIZACIÓN N+1) ---
+# get_db() ya está importado, por lo que las siguientes funciones 
+# que usan Depends(get_db) deberían funcionar.
 
 @router.get("/", response_model=schemas.PaginatedTrabajos)
 def leer_trabajos_paginados(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db), # <- Ahora get_db está definido
     page: int = 1,
     limit: int = 15,
     sort_by: Optional[str] = "id",
@@ -61,12 +60,9 @@ def leer_trabajos_paginados(
     fecha_hasta: Optional[datetime.date] = Query(None),
     activos: bool = True,
     patente: Optional[str] = None,
-    current_user: schemas.User = Depends(auth.get_current_user)
+    current_user: schemas.User = Depends(auth.get_current_active_user) # Usa la dependencia correcta
 ):
     try:
-        # --- 👇 SUB CONSULTA PARA CALCULAR TIEMPO DETENIDO ---
-        # Esto crea una subconsulta que se ejecutará por cada fila de 'Trabajo'
-        # en la base de datos, lo cual es mucho más eficiente que hacerlo en Python.
         tiempo_detenido_subquery = (
             select(
                 func.sum(
@@ -80,18 +76,15 @@ def leer_trabajos_paginados(
                 models.HistorialDeEstado.trabajo_id == models.Trabajo.id,
                 models.HistorialDeEstado.estado == 'trabajo detenido'
             )
-            .correlate(models.Trabajo) # <-- Enlaza esta subconsulta al 'models.Trabajo' de la consulta principal
+            .correlate(models.Trabajo) 
             .as_scalar()
         )
 
-        # --- 👇 CONSULTA PRINCIPAL MODIFICADA ---
-        # Ahora seleccionamos el objeto Trabajo Y el resultado de la subconsulta
         query = db.query(
             models.Trabajo,
             func.coalesce(tiempo_detenido_subquery, 0).label("tiempo_detenido_segundos")
         )
 
-        # --- LÓGICA DE FILTRADO (SIN CAMBIOS) ---
         if patente:
             query = query.filter(models.Trabajo.patente.ilike(f"%{patente}%")).order_by(models.Trabajo.fecha_creacion_pedido.desc())
         else:
@@ -116,10 +109,8 @@ def leer_trabajos_paginados(
             if fecha_hasta:
                 query = query.filter(models.Trabajo.fecha_creacion_pedido < fecha_hasta + datetime.timedelta(days=1))
 
-        # --- CONTEO (SIN CAMBIOS) ---
         total_records = query.count()
 
-        # --- ORDENAMIENTO (SIN CAMBIOS) ---
         if sort_by and hasattr(models.Trabajo, sort_by):
             columna_a_ordenar = getattr(models.Trabajo, sort_by)
             if sort_order.lower() == "desc":
@@ -128,14 +119,9 @@ def leer_trabajos_paginados(
                 query = query.order_by(columna_a_ordenar.asc())
         
         offset = (page - 1) * limit
-        
-        # --- 👇 OBTENCIÓN DE ITEMS (Ahora devuelve tuplas) ---
         items_con_tiempo = query.offset(offset).limit(limit).all()
         
-        # --- 👇 CÁLCULO DE DÍAS (MODIFICADO) ---
-        items = [] # Creamos una lista limpia de 'trabajos'
-        
-        # Desempaquetamos la tupla: (objeto Trabajo, valor_subconsulta)
+        items = [] 
         for trabajo, tiempo_detenido_segundos in items_con_tiempo:
             try:
                 fecha_inicio_conteo = trabajo.fecha_llegada_taller or trabajo.fecha_creacion_pedido
@@ -148,11 +134,6 @@ def leer_trabajos_paginados(
                     fecha_inicio_conteo = fecha_inicio_conteo.replace(tzinfo=None)
 
                 tiempo_total_segundos = (datetime.datetime.utcnow() - fecha_inicio_conteo).total_seconds()
-                
-                # --- 🛑 CONSULTA N+1 ELIMINADA 🛑 ---
-                # Ya no necesitamos esto, 'tiempo_detenido_segundos'
-                # viene de la consulta principal.
-                
                 tiempo_activo_segundos = tiempo_total_segundos - tiempo_detenido_segundos
                 trabajo.dias_de_estadia_activa = int(tiempo_activo_segundos / (24 * 3600)) if tiempo_activo_segundos > 0 else 0
             
@@ -160,7 +141,7 @@ def leer_trabajos_paginados(
                 logger.error(f"Error calculando días de estadía para trabajo ID {trabajo.id}: {e}")
                 trabajo.dias_de_estadia_activa = -1
             
-            items.append(trabajo) # Añadimos el trabajo (ya modificado) a la lista
+            items.append(trabajo) 
 
         return {"items": items, "total": total_records}
 
@@ -171,15 +152,13 @@ def leer_trabajos_paginados(
         logger.error(f"Error inesperado en leer_trabajos_paginados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Ocurrió un error inesperado en el servidor al listar los trabajos.")
 
-# --- 6️⃣ FIN DE REFACTORIZACIÓN (OPTIMIZACIÓN N+1) ---
-
 
 @router.patch("/{trabajo_id}", response_model=schemas.Trabajo)
 def actualizar_trabajo(
     trabajo_id: int, 
     trabajo_update: schemas.TrabajoUpdate, 
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db), # <- Ahora get_db está definido
+    current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     trabajo_db = db.query(models.Trabajo).filter(models.Trabajo.id == trabajo_id).first()
     if not trabajo_db:
@@ -197,8 +176,8 @@ def actualizar_trabajo(
 def actualizar_estado_trabajo(
     trabajo_id: int, 
     estado_update: schemas.TrabajoUpdateEstado = Body(...), 
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db), # <- Ahora get_db está definido
+    current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     trabajo_db = db.query(models.Trabajo).filter(models.Trabajo.id == trabajo_id).first()
     if not trabajo_db: raise HTTPException(status_code=404, detail="Trabajo no encontrado")
@@ -241,26 +220,27 @@ def actualizar_estado_trabajo(
 @router.get("/{trabajo_id}/historial", response_model=List[schemas.Historial])
 def leer_historial_trabajo(
     trabajo_id: int, 
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db), # <- Ahora get_db está definido
+    current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     trabajo = db.query(models.Trabajo).filter(models.Trabajo.id == trabajo_id).first()
     if not trabajo:
         raise HTTPException(status_code=404, detail="Trabajo no encontrado")
-    return sorted(trabajo.historial, key=lambda x: x.fecha_inicio)
+    # Aseguramos que historial sea una lista antes de ordenar
+    historial = trabajo.historial if trabajo.historial else []
+    return sorted(historial, key=lambda x: x.fecha_inicio)
 
 
-# --- Funciones auxiliares de carga de Excel (del Paso 5) ---
+# --- Funciones auxiliares de carga de Excel ---
+# ... (Estas funciones _buscar_fila_encabezado, _validar_y_renombrar_columnas, etc. se mantienen igual) ...
 
 def _buscar_fila_encabezado(df_temp: DataFrame) -> int:
-    """Busca la fila que contiene el encabezado 'Pedido DBM'."""
     for i, row in df_temp.head(10).iterrows():
         if 'Pedido DBM' in row.values:
             return i
     return -1
 
 def _validar_y_renombrar_columnas(df: DataFrame) -> DataFrame:
-    """Valida que las columnas necesarias existan y las renombra."""
     missing_cols = [col for col in COLUMN_MAPPING.keys() if col not in df.columns]
     if missing_cols:
         logger.error(f"Faltan columnas en el Excel: {missing_cols}")
@@ -270,7 +250,6 @@ def _validar_y_renombrar_columnas(df: DataFrame) -> DataFrame:
     return df
 
 def _limpiar_dataframe(df: DataFrame) -> DataFrame:
-    """Convierte tipos de datos (fechas, números) y limpia datos nulos."""
     date_columns = ['fecha_creacion_pedido']
     for col in date_columns:
         if col in df.columns:
@@ -286,7 +265,6 @@ def _limpiar_dataframe(df: DataFrame) -> DataFrame:
     return df
 
 def _procesar_filas_dataframe(db: Session, df: DataFrame) -> Tuple[int, int]:
-    """Itera sobre el DataFrame y crea/actualiza trabajos en la base de datos."""
     trabajos_creados, trabajos_actualizados = 0, 0
     db_model_columns = {c.name for c in inspect(models.Trabajo).c}
 
@@ -318,16 +296,13 @@ def _procesar_filas_dataframe(db: Session, df: DataFrame) -> Tuple[int, int]:
             
     return trabajos_creados, trabajos_actualizados
 
-
+# Ruta principal de carga de Excel
 @router.post("/upload-excel/", response_model=schemas.UploadResponse, status_code=status.HTTP_201_CREATED)
 async def cargar_trabajos_desde_excel(
     file: UploadFile = File(...), 
-    db: Session = Depends(get_db),
-    current_user: schemas.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db), # <- Ahora get_db está definido
+    current_user: schemas.User = Depends(auth.get_current_admin_user) # <- Usa la dependencia correcta de admin
 ):
-    """
-    Ruta principal para cargar trabajos desde un archivo Excel.
-    """
     if not file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de archivo inválido. Se requiere .xlsx o .xls")
     
