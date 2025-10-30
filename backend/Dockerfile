@@ -1,5 +1,6 @@
 # 1. Usar una imagen oficial de Python como base
-FROM python:3.9-slim
+# 👇 CORRECCIÓN: Usar una versión de Python que soporte la sintaxis moderna (3.10+)
+FROM python:3.10-slim
 
 # --- SECCIÓN AÑADIDA ---
 # Instalar dependencias de compilación para psycopg2
